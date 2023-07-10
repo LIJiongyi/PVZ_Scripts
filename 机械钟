@@ -1,0 +1,889 @@
+/*
+ * @coding: utf-8
+ * @Author: vector-wlc,使命永驻，天槊奇点
+ * @Date: 2020-05-13
+ * @Description: PE 机械钟
+ *               本代码基于vector-wlc的传统四炮挂机代码
+ *               打法：
+ *               快速关N|AA'| I*n ,50 （优先加法,最省冰的策略)
+ *               慢速关连续冰波，灰烬减压
+ *               极速关半放羊
+ *               回复关“放羊”
+ *               本代码的目的是实现短程生存(预期20-50F)
+ *               未很好解决的问题：智能补曾
+ *               若彻底解决此问题，机械钟大概就可实现真挂机
+ *
+ */
+
+#include "pvz.h"
+
+using namespace pvz;
+
+// 枚举卡片的对象序列
+enum SeedIndex
+{
+    ICE_SHROOM = 0,      //寒冰菇
+    ICE_SHROOM_IMITATOR, //模仿寒冰菇
+    COFFEE_BEEN,         //咖啡豆
+    SQUASH,              //倭瓜
+    CHERRY,              //樱桃炸弹
+    CHILI,               //火爆辣椒
+    PUMPKIN,             //南瓜头
+    HMG,                 //毁灭菇
+    FUME_SHROOM,         //大喷菇
+    PUFF_SHROOM          //小喷菇
+};
+
+// 修补南瓜头
+void FixPumpkin();
+
+// 修补大喷菇
+void FixFumeShroom();
+
+void FixGloomShroom();
+
+// 应对波数主要逻辑函数
+void DealFastWave();
+
+void DealSlowAndChangeWave();
+
+void DealSheepWave();
+
+void DealSFastWave(); //S=极速
+
+// 使用倭瓜
+void UseSquash();
+
+void UseCherry();
+
+void UseChili();
+
+//矫正带有bug的自动存冰线程
+void CorrectIceFiller();
+
+void CorrectIceFiller2();
+
+// 这个全局变量是用来控制补种大喷菇的，因为咖啡豆不能随便用
+// 当然这里可以使用指针进行线程之间的数据传递，但是方法比这个要复杂一些
+// 所以此处使用全局变量的方法
+// 如果使用指针，那么 FixFumeShroom 函数原型需要写为 void FixFumeShroom(bool *);
+// 当然这里还可以继承自动线程类来解决这个问题
+bool coffee_been_usable = false;
+
+int main()
+{
+    std::vector<int> zombie_type;
+    GetZombieType(zombie_type);
+    if (find(zombie_type.begin(), zombie_type.end(), 32) != zombie_type.end()) //慢速关
+    {
+        SelectCards({{"hbg"}, {"Mhbg"}, {"kfd"}, {"wg"}, {"ytzd"}, {"hblj"}, {"ngt"}, {"hmg"}, {"dpg"}, {"xpg"}});
+    }
+    else
+    {
+        if (find(zombie_type.begin(), zombie_type.end(), 15) != zombie_type.end()) //快速、极速关
+        {
+            SelectCards({{"hbg"}, {"Mhbg"}, {"kfd"}, {"hy"}, {"ytzd"}, {"hblj"}, {"ngt"}, {"hmg"}, {"dpg"}, {"yyg"}});
+        }
+        else //回复关
+        {
+            SelectCards({{"hbg"}, {"Mhbg"}, {"kfd"}, {"wg"}, {"ytzd"}, {"hblj"}, {"ngt"}, {"hmg"}, {"dpg"}, {"xpg"}});
+        }
+    }
+
+    WaitGameStart();
+
+    ice_filler.start({{4, 3}, {3, 4}, {3, 3}, {3, 2}, {2, 3}});
+    if (find(zombie_type.begin(), zombie_type.end(), 32) != zombie_type.end())
+    {
+        dian_cai_placer.start({10}, {{1, 9}, {6, 9}});
+        dian_cai_placer.resetProtectedPlantList({{1, 5}, {6, 5}});
+        dian_cai_placer.resetZombieTypeList({7, 23, 32});
+    }
+
+    else if (find(zombie_type.begin(), zombie_type.end(), 7) != zombie_type.end() &&
+             find(zombie_type.begin(), zombie_type.end(), 15) != zombie_type.end()) //快速关
+    {
+        nut_fixer.start(30, {{2, 6}, {5, 6}}, 300);
+    }
+
+    RunningInThread(FixPumpkin);
+    RunningInThread(UseSquash);
+    RunningInThread(FixFumeShroom);
+    RunningInThread(FixGloomShroom);
+    RunningInThread(CorrectIceFiller);
+    RunningInThread(CorrectIceFiller2);
+    RunningInThread(UseCherry);
+    RunningInThread(UseChili);
+
+    static SeedMemory hmg_seed(HMG);
+    static SeedMemory cherry_seed(CHERRY);
+    static SeedMemory chili_seed(CHILI);
+
+    for (wave = 1; wave < 21; wave++)
+    {
+        Prejudge(0, wave);
+        // 冰杀小偷
+        if (wave_in(10, 20))
+        {
+            Until(375 - 298 + 50);
+            ice_filler.coffee();
+            if ((wave_in(20)))
+            {
+                if (find(zombie_type.begin(), zombie_type.end(), 32) != zombie_type.end()) //灰烬打红眼
+                {
+                    Until(340 - 100);
+                    if (chili_seed.isUsable()) //防止“传送红眼”影响下一波的出怪判断
+                    {
+                        Shovel({{6, 9}});
+                        Card(CHILI + 1, {{6, 9}});
+                    }
+                    if (cherry_seed.isUsable())
+                    {
+                        Shovel({{5, 9}});
+                        Card(CHERRY + 1, {{5, 9}});
+                    }
+                }
+                else if (find(zombie_type.begin(), zombie_type.end(), 15) != zombie_type.end())
+                {
+                    if (GetPlantIndex(2, 6, 30) < 0 && GetPlantIndex(5, 6, 30) < 0)
+                    {
+                        StopMaidCheats();
+                        nut_fixer.pause();
+                    }
+                    else
+                    {
+                        StopMaidCheats();
+                        nut_fixer.pause();
+                        Shovel(2, 6, true);
+                        Shovel(5, 6, true);
+                    }
+                }
+                else
+                {
+                    StopMaidCheats();
+                    dian_cai_placer.resetSetDianCaiList({{1, 9}, {6, 9}});
+                    Shovel({{2, 9}, {5, 9}, {2, 8}, {5, 8}, {2, 7}, {5, 7}});
+                }
+            }
+        }
+        else if (find(zombie_type.begin(), zombie_type.end(), 32) != zombie_type.end()) //有红眼
+        {
+            DealSlowAndChangeWave();
+        }
+        else if (find(zombie_type.begin(), zombie_type.end(), 15) != zombie_type.end()) //有小丑
+        {
+            DealSFastWave();
+        }
+        else
+        {
+            DealSheepWave();
+        }
+        // 第 9 19 波允许补大喷
+        if (wave_in(9, 19))
+        {
+            coffee_been_usable = true;
+            if (wave_in(9, 19))
+            {
+                while (pvz::Countdown() > 150) // 等待倒计时结束
+                    Sleep(5);
+                while (pvz::Countdown() > 4)
+                    Sleep(5);
+                while (pvz::HugeWaveCountdown() > 150)
+                    Sleep(5);
+            }
+            coffee_been_usable = false;
+        }
+    }
+
+    WaitGameEnd();
+    return 0;
+}
+
+void FixPumpkin()
+{
+    SeedMemory pumpkin_seed(PUMPKIN); //首先创建一个读取南瓜卡片内存信息的对象
+    PlantMemory pumpkin;              //再创建一个读取植物内存信息的对象
+
+    int index, plant_count_max;
+    while (1)
+    {
+        Sleep(100);
+        if (pumpkin_seed.isUsable())
+        {
+            // 遍历全场植物
+            plant_count_max = pumpkin.countMax();
+            for (index = 0; index < plant_count_max; index++)
+            {
+                pumpkin.setIndex(index);
+                // 如果发现南瓜该修补了(机械钟需考虑四列被砸，所以压扁也补)
+                if (!pumpkin.isDisappeared() &&
+                        pumpkin.isCrushed() && pumpkin.type() == 30 ||
+                    pumpkin.hp() < 2 * 4000 / 3 && pumpkin.type() == 30)
+                {
+                    // 种植南瓜
+
+                    Card(PUMPKIN + 1, pumpkin.row() + 1, pumpkin.col() + 1);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void FixFumeShroom() //修补四列和五列的大喷
+{
+    SeedMemory fume_shroom_seed(FUME_SHROOM);
+    SeedMemory coffee_been_seed(COFFEE_BEEN);
+    while (1)
+    {
+        Sleep(100);
+        if (coffee_been_usable && fume_shroom_seed.isUsable() && coffee_been_seed.isUsable())
+        {
+            if (GetPlantIndex(1, 5) == -1)
+                Card({{FUME_SHROOM + 1, 1, 5}, {COFFEE_BEEN + 1, 1, 5}});
+            else if (GetPlantIndex(6, 5) == -1)
+                Card({{FUME_SHROOM + 1, 6, 5}, {COFFEE_BEEN + 1, 6, 5}});
+            else if (GetPlantIndex(1, 4) == -1)
+                Card({{FUME_SHROOM + 1, 1, 4}, {COFFEE_BEEN + 1, 1, 4}});
+            else if (GetPlantIndex(6, 4) == -1)
+                Card({{FUME_SHROOM + 1, 6, 4}, {COFFEE_BEEN + 1, 6, 4}});
+        }
+    }
+}
+
+void FixGloomShroom()
+{
+    SeedMemory fume_shroom_seed(FUME_SHROOM);
+    SeedMemory coffee_been_seed(COFFEE_BEEN);
+    SeedMemory pumpkin_seed(NGT_30);
+    SeedMemory gloom_shroom_seed(YYG_42);
+    SeedMemory lily_pad_seed(HY_16);
+    while (1)
+    {
+        Sleep(100);
+        if (coffee_been_usable && fume_shroom_seed.isUsable() && coffee_been_seed.isUsable() && gloom_shroom_seed.isUsable() && lily_pad_seed.isUsable() && pumpkin_seed.isUsable())
+        {
+            if (GetPlantIndex(4, 9, YYG_42) == -1)
+                Card({{HY_16 + 1, 4, 9}, {FUME_SHROOM + 1, 4, 9}, {YYG_42 + 1, 4, 9}, {COFFEE_BEEN + 1, 4, 9}, {NGT_30 + 1, 4, 9}});
+            else if (GetPlantIndex(3, 9, YYG_42) == -1 && GetPlantIndex(4, 9) >= 0)
+                Card({{HY_16 + 1, 3, 9}, {FUME_SHROOM + 1, 3, 9}, {YYG_42 + 1, 3, 9}, {COFFEE_BEEN + 1, 3, 9}, {NGT_30 + 1, 3, 9}});
+            else if (GetPlantIndex(3, 8, YYG_42) == -1 && GetPlantIndex(4, 9) >= 0 && GetPlantIndex(3, 9) >= 0)
+                Card({{HY_16 + 1, 3, 8}, {FUME_SHROOM + 1, 3, 8}, {YYG_42 + 1, 3, 8}, {COFFEE_BEEN + 1, 3, 8}, {NGT_30 + 1, 3, 8}});
+            else if (GetPlantIndex(4, 8, YYG_42) == -1 && GetPlantIndex(3, 9) >= 0 && GetPlantIndex(4, 9) >= 0 && GetPlantIndex(3, 8) >= 0)
+                Card({{HY_16 + 1, 4, 8}, {FUME_SHROOM + 1, 4, 8}, {YYG_42 + 1, 4, 8}, {COFFEE_BEEN + 1, 4, 8}, {NGT_30 + 1, 4, 8}});
+        }
+    }
+}
+
+void DealFastWave() //优先加法,用于变速后的变速关。
+{
+    Until(340 - 298);
+
+    static SeedMemory hmg_seed(HMG);
+    static SeedMemory cherry_seed(CHERRY);
+    static SeedMemory chili_seed(CHILI);
+
+    if (hmg_seed.isUsable())
+    {
+        if (hmg_seed.isUsable() && cherry_seed.isUsable() || 5000 - cherry_seed.CD() < 601 + 390) //检测灰烬,解决咖啡豆冲突
+        {
+            if ((wave_in(1))) //九列核只有起手用
+            {
+                if (IsPlantable(2, 9)) //优先(2,9)
+                {
+                    Card(HMG + 1, {{2, 9}});
+                    Card(COFFEE_BEEN + 1, {{2, 9}});
+                }
+                else if (IsPlantable(5, 9)) //其次(5,9)
+                {
+                    Until(342 - 298);
+                    Card(HMG + 1, {{5, 9}});
+                    Card(COFFEE_BEEN + 1, {{5, 9}});
+                }
+            }
+            else if (!(wave_in(1)))
+            {
+                Until(545 - 298);
+
+                if (IsPlantable(2, 7)) //再次(2,7)
+                {
+                    Until(548 - 298);
+                    Card(HMG + 1, {{2, 7}});
+                    Card(COFFEE_BEEN + 1, {{2, 7}});
+                }
+                else if (IsPlantable(5, 7)) //最后(5,7)
+                {
+                    Until(550 - 298);
+                    Card(HMG + 1, {{5, 7}});
+                    Card(COFFEE_BEEN + 1, {{5, 7}});
+                }
+            }
+        }
+        else //避免咖啡豆冲突,冰代核
+            ice_filler.coffee();
+    }
+
+    // 如果尝试放核不成功，即核CD或者核坑未恢复
+    if (!hmg_seed.isUsable() ||
+        !IsPlantable(2, 9) &&
+            !IsPlantable(5, 9) &&
+            !IsPlantable(2, 7) &&
+            !IsPlantable(5, 7))
+    {
+
+        // 如果灰烬能够使用
+        if (cherry_seed.isUsable() || 5000 - cherry_seed.CD() < 390)
+        {
+            // 使用辣椒樱桃
+            Until(550 - 100);
+            Card(CHERRY + 1, {{5, 8}});
+
+            if (IsPlantable(2, 8, true)) //正常情况
+            {
+                Card(CHILI + 1, {{2, 8}});
+            }
+            else if (!IsPlantable(2, 8, true)) //(2,8)被冰道覆盖了
+            {
+                Card(CHILI + 1, {{2, 7}});
+                if (!IsPlantable(2, 7, true)) //(2,8)被冰道覆盖了,(2,7)有核坑
+                {
+                    if (GetPlantIndex(2, 3, HBG_14) >= 0 ||
+                        GetPlantIndex(2, 3, HBG_14) == -2) //(2,3)有存冰或变身中的模仿者
+                    {
+                        Shovel({{2, 3}});
+                    }
+                    Card(CHILI + 1, {{2, 3}});
+                }
+            }
+        }
+        else // 灰烬没有恢复只能冰杀
+            ice_filler.coffee();
+    }
+}
+
+void DealSlowAndChangeWave() //慢速和变速关，慢速部分为首4尾2连续冰波
+{
+    Until(340 - 298);
+
+    static SeedMemory hmg_seed(HMG);
+    static SeedMemory cherry_seed(CHERRY);
+    static SeedMemory chili_seed(CHILI);
+    PlantMemory pumpkin;
+
+    std::vector<int> zombies_type;
+    GetWaveZombieType(zombies_type);
+    if ((wave_in(1, 9, 19)) && hmg_seed.isUsable()) //只有1、9、19波用核
+    {
+        if (hmg_seed.isUsable())
+        {
+            if ((wave_in(1))) //九列核只有起手用
+            {
+                if (IsPlantable(2, 9)) //优先(2,9)
+                {
+                    Card(HMG + 1, {{2, 9}});
+                    Card(COFFEE_BEEN + 1, {{2, 9}});
+                }
+                else if (IsPlantable(5, 9)) //其次(5,9)
+                {
+                    Until(342 - 298);
+                    Card(HMG + 1, {{5, 9}});
+                    Card(COFFEE_BEEN + 1, {{5, 9}});
+                }
+            }
+            else if ((wave_in(9, 19)))
+            {
+                Until(340 - 298);
+
+                if (!IsPlantable(2, 7) &&
+                    !IsPlantable(5, 7))
+                {
+                    ice_filler.coffee();
+                }
+                Until(545 - 298);
+
+                if (IsPlantable(2, 7)) //再次(2,7)
+                {
+                    Until(548 - 298);
+                    Card(HMG + 1, {{2, 7}});
+                    Card(COFFEE_BEEN + 1, {{2, 7}});
+                }
+                else if (IsPlantable(5, 7)) //最后(5,7)
+                {
+                    Until(550 - 298);
+                    Card(HMG + 1, {{5, 7}});
+                    Card(COFFEE_BEEN + 1, {{5, 7}});
+                }
+            }
+        }
+    }
+    // 第2波，如果灰烬能够使用
+    else if ((wave_in(2)))
+    {
+        if (cherry_seed.isUsable() && chili_seed.isUsable() || 5000 - cherry_seed.CD() < 390 && 5000 - chili_seed.CD() < 390) // 使用辣椒樱桃
+        {
+
+            Until(550 - 100);
+            Card(CHERRY + 1, {{5, 8}});
+
+            if (IsPlantable(2, 8, true)) //正常情况
+            {
+                Card(CHILI + 1, {{2, 8}});
+            }
+            else if (!IsPlantable(2, 8, true)) //(2,8)被冰道覆盖了
+            {
+                Card(CHILI + 1, {{2, 7}});
+                if (!IsPlantable(2, 7, true)) //(2,8)被冰道覆盖了,(2,7)有核坑
+                {
+                    if (GetPlantIndex(2, 3, HBG_14) >= 0 ||
+                        GetPlantIndex(2, 3, HBG_14) == -2) //(2,3)有存冰或变身中的模仿者
+                    {
+                        Shovel({{2, 3}});
+                    }
+                    Card(CHILI + 1, {{2, 3}});
+                }
+            }
+        }
+        else
+        {
+            ice_filler.coffee();
+        }
+    }
+    else if (find(zombies_type.begin(), zombies_type.end(), 32) != zombies_type.end() == false)
+    {
+        if (find(zombies_type.begin(), zombies_type.end(), 15) != zombies_type.end())
+        {
+            DealFastWave();
+        }
+        else
+        {
+            DealSheepWave();
+        }
+    }
+    else
+        ice_filler.coffee();
+}
+
+void DealSheepWave() //顾名思义
+{
+    StartMaidCheats(); //控制伴舞
+    ZombieMemory zombie;
+
+    int index = 0, zombie_count_max = 0, zombie_type = 0, zombie_row = 0;
+    float zombie_abscissa = 0.0;
+
+    PlantMemory pumpkin; //再创建一个读取植物内存信息的对象
+
+    int index1, plant_count_max;
+
+    dian_cai_placer.resetProtectedPlantList({{1, 5}, {6, 5}, {2, 6}, {5, 6}});
+    dian_cai_placer.resetZombieTypeList({7, 23});
+    dian_cai_placer.resetSetDianCaiList({{1, 9}, {2, 9}, {5, 9}, {6, 9}});
+    Until(340 - 298);
+    if ((wave_in(1)))
+    {
+        if (zombie.type() == 7 ||
+            zombie.type() == 23)
+        {
+            if (IsPlantable(2, 9))
+            {
+                Shovel(2, 9);
+                Card(HMG + 1, {{2, 9}});
+                Card(COFFEE_BEEN + 1, {{2, 9}});
+            }
+            else if (IsPlantable(5, 9))
+            {
+                Until(342 - 298);
+                Shovel(2, 9);
+                Card(HMG + 1, {{5, 9}});
+                Card(COFFEE_BEEN + 1, {{5, 9}});
+            }
+        }
+    }
+    else if (!(wave_in(10, 20)))
+    {
+        zombie_count_max = zombie.countMax();
+        for (index = 0; index < zombie_count_max; index++)
+        {
+            zombie.setIndex(index);
+            if (zombie.isExist() &&
+                !zombie.isDead() &&
+                !zombie.isDisappeared())
+            {
+                if (zombie.type() == 7 && zombie.hp() + zombie.oneHp() > 500 ||
+                    zombie.type() == 23 && zombie.hp() + zombie.oneHp() > 900) //一般情况，针对白眼和橄榄
+                {
+                    if (zombie.type() == 7 && zombie.abscissa() < 480 && zombie.row() == (1, 6) ||
+                        zombie.type() == 7 && zombie.abscissa() < 520 && zombie.row() == (2, 5) ||
+                        zombie.type() == 23 && zombie.abscissa() < 500)
+                    {
+                        ice_filler.coffee();
+                    }
+                }
+                else if (zombie.type() == 16) //针对气球
+                {
+                    if (zombie.type() == 16 && zombie.abscissa() < 240 && zombie.row() == (1, 6) ||
+                        zombie.type() == 16 && zombie.abscissa() < 520 && zombie.row() == (2, 5))
+                    {
+                        ice_filler.coffee();
+                    }
+                }
+                else if (zombie.type() == 14) //针对海豚
+                {
+                    plant_count_max = pumpkin.countMax();
+                    for (index1 = 0; index1 < plant_count_max; index1++)
+                    {
+                        pumpkin.setIndex(index1);
+                        // 如果发现南瓜烂了
+                        if (!pumpkin.isDisappeared() && pumpkin.hp() < 1 * 4000 / 3 && pumpkin.type() == 30)
+                        {
+                            ice_filler.coffee();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void DealSFastWave() //半放羊，曾套策略，用于快速/极速关
+{
+    static SeedMemory hmg_seed(HMG);
+    static SeedMemory cherry_seed(CHERRY);
+    static SeedMemory chili_seed(CHILI);
+    StartMaidCheats();
+
+    Until(340 - 298);
+
+    if (hmg_seed.isUsable() && wave_in(1))
+    {
+        if (IsPlantable(2, 9))
+        {
+            Card(HMG + 1, {{2, 9}});
+            Card(COFFEE_BEEN + 1, {{2, 9}});
+        }
+        else if (IsPlantable(2, 8))
+        {
+            Until(342 - 298);
+            Card(HMG + 1, {{2, 8}});
+            Card(COFFEE_BEEN + 1, {{2, 8}});
+        }
+    }
+    else if ((wave_in(2)))
+    {
+        if (cherry_seed.isUsable() && chili_seed.isUsable() || 5000 - cherry_seed.CD() < 390 && 5000 - chili_seed.CD() < 390) // 使用辣椒樱桃
+        {
+
+            Until(550 - 100);
+            Card(CHERRY + 1, {{5, 8}});
+
+            if (IsPlantable(2, 8, true))
+            {
+                Card(CHILI + 1, {{2, 8}});
+            }
+            else if (!IsPlantable(2, 8, true))
+            {
+                Card(CHILI + 1, {{2, 7}});
+                if (!IsPlantable(2, 7, true))
+                {
+                    if (GetPlantIndex(2, 3, HBG_14) >= 0 ||
+                        GetPlantIndex(2, 3, HBG_14) == -2)
+                    {
+                        Shovel({{2, 3}});
+                    }
+                    Card(CHILI + 1, {{2, 3}});
+                }
+            }
+        }
+    }
+    else if ((wave_in(11)))
+    {
+        if (cherry_seed.isUsable() && chili_seed.isUsable() || 5000 - cherry_seed.CD() < 390 && 5000 - chili_seed.CD() < 390) // 使用辣椒樱桃
+        {
+
+            Until(550 - 100);
+            Card(CHERRY + 1, {{5, 8}});
+
+            if (IsPlantable(2, 8, true))
+            {
+                Card(CHILI + 1, {{2, 8}});
+            }
+            else if (!IsPlantable(2, 8, true))
+            {
+                Card(CHILI + 1, {{2, 7}});
+                if (!IsPlantable(2, 7, true))
+                {
+                    if (GetPlantIndex(2, 3, HBG_14) >= 0 ||
+                        GetPlantIndex(2, 3, HBG_14) == -2)
+                    {
+                        Shovel({{2, 3}});
+                    }
+                    Card(CHILI + 1, {{2, 3}});
+                }
+            }
+        }
+    }
+    else if (wave_in(3, 5, 7, 9, 13, 15, 17, 19))
+    {
+        Prejudge(340 - 298, wave);
+        ice_filler.coffee();
+    }
+}
+
+void UseSquash() //倭瓜减压
+{
+    SeedMemory squash_seed(SQUASH);
+    ZombieMemory zombie;
+
+    struct
+    {
+        float min_abscissa;
+        int min_row;
+    } zombie_min_position{560, 0};
+
+    int index = 0, zombie_count_max = 0, zombie_type = 0, zombie_row = 0;
+    float zombie_abscissa = 0.0;
+    GRID use_squash_grid{0, 0};
+
+    while (1)
+    {
+        Sleep(100);
+        zombie_min_position = {560, 0};
+        if (squash_seed.isUsable() && (zombie_type = 32) || (zombie_type = 32 == false) && (zombie_type = 15 == false))
+        {
+            zombie_count_max = zombie.countMax();
+            for (index = 0; index < zombie_count_max; index++)
+            {
+                zombie.setIndex(index);
+
+                if (zombie.isExist() &&
+                    !zombie.isDead() &&
+                    !zombie.isDisappeared() &&
+                    zombie.hp() + zombie.oneHp() > 500)
+                {
+                    zombie_type = zombie.type();
+                    zombie_abscissa = zombie.abscissa();
+                    zombie_row = zombie.row() + 1;
+                    if (zombie_type == 7)
+                        zombie_abscissa += 40;
+                    if ((zombie_type == 23 || zombie_type == 32) &&
+                            (zombie_row == 1 || zombie_row == 6) ||
+                        (zombie_type == 7) &&
+                            (zombie.freezeCountdown() == 0) &&
+                            (zombie_row == 1) ||
+                        (zombie_type == 7) &&
+                            (zombie_row == 6))
+                    {
+                        if (zombie_abscissa < zombie_min_position.min_abscissa)
+                        {
+                            zombie_min_position.min_abscissa = zombie_abscissa;
+                            zombie_min_position.min_row = zombie_row;
+                        }
+                    }
+                }
+            }
+
+            // 如果检测到了僵尸
+            if (zombie_min_position.min_row != 0)
+            {
+                use_squash_grid = {zombie_min_position.min_row, int(zombie_min_position.min_abscissa / 80)};
+
+                // 规定种植范围
+                if (use_squash_grid.col >= 5)
+                    use_squash_grid.col = 6;
+                if (use_squash_grid.col < 5)
+                    use_squash_grid.col = 5;
+                if (IsPlantable(use_squash_grid.row, use_squash_grid.col))
+                {
+                    if (use_squash_grid.col <= 5 ||
+                        GetPlantIndex(use_squash_grid.row, use_squash_grid.col, XPG_8) > -2)
+                    {
+                        Shovel(use_squash_grid.row, use_squash_grid.col);
+                    }
+                    Card(SQUASH + 1, use_squash_grid.row, use_squash_grid.col);
+                }
+            }
+        }
+    }
+}
+
+void UseCherry() //樱桃减压
+{
+    SeedMemory cherry_seed(CHERRY);
+    ZombieMemory zombie;
+
+    struct
+    {
+        float min_abscissa;
+        int min_row;
+    } zombie_min_position{480, 0};
+
+    int index = 0, zombie_count_max = 0, zombie_type = 0, zombie_row = 0;
+    float zombie_abscissa = 0.0;
+    GRID use_squash_grid{0, 0};
+
+    while (1)
+    {
+        Sleep(100);
+        zombie_min_position = {480, 0};
+        if (cherry_seed.isUsable() && !(wave_in(20)) && !(wave_in(1)) && !(wave_in(2)))
+        {
+            zombie_count_max = zombie.countMax();
+            for (index = 0; index < zombie_count_max; index++)
+            {
+                zombie.setIndex(index);
+
+                if (zombie.isExist() &&
+                    !zombie.isDead() &&
+                    !zombie.isDisappeared() &&
+                    zombie.hp() + zombie.oneHp() > 2000)
+                {
+                    zombie_type = zombie.type();
+                    zombie_abscissa = zombie.abscissa();
+                    zombie_row = zombie.row() + 1;
+                    if ((zombie_type == 23 || zombie_type == 32) &&
+                        (zombie_row == 1))
+                    {
+                        if (zombie_abscissa < zombie_min_position.min_abscissa)
+                        {
+                            zombie_min_position.min_abscissa = zombie_abscissa;
+                            zombie_min_position.min_row = zombie_row;
+                        }
+                    }
+                }
+            }
+
+            // 如果检测到了僵尸
+            if (zombie_min_position.min_row != 0)
+            {
+                use_squash_grid = {zombie_min_position.min_row, int(zombie_min_position.min_abscissa / 80)};
+
+                // 规定种植范围
+                if (use_squash_grid.col >= 5)
+                    use_squash_grid.col = 6;
+                if (use_squash_grid.col < 5)
+                    use_squash_grid.col = 5;
+                if (IsPlantable(use_squash_grid.row, use_squash_grid.col))
+                {
+                    if (use_squash_grid.col <= 5 ||
+                        GetPlantIndex(use_squash_grid.row, use_squash_grid.col, XPG_8) > -2)
+                    {
+                        Shovel(use_squash_grid.row, use_squash_grid.col);
+                    }
+                    Card(CHERRY + 1, use_squash_grid.row, use_squash_grid.col);
+                }
+            }
+        }
+    }
+}
+
+void UseChili() //辣椒减压
+{
+    SeedMemory chili_seed(CHILI);
+    ZombieMemory zombie;
+
+    struct
+    {
+        float min_abscissa;
+        int min_row;
+    } zombie_min_position{510, 0};
+
+    int index = 0, zombie_count_max = 0, zombie_type = 0, zombie_row = 0;
+    float zombie_abscissa = 0.0;
+    GRID use_squash_grid{0, 0};
+
+    while (1)
+    {
+        Sleep(100);
+        zombie_min_position = {510, 0};
+        if (chili_seed.isUsable() && !(wave_in(20) && !(wave_in(1)) && !(wave_in(2))))
+        {
+            zombie_count_max = zombie.countMax();
+            for (index = 0; index < zombie_count_max; index++)
+            {
+                zombie.setIndex(index);
+
+                if (zombie.isExist() &&
+                    !zombie.isDead() &&
+                    !zombie.isDisappeared() &&
+                    zombie.hp() + zombie.oneHp() > 1800)
+                {
+                    zombie_type = zombie.type();
+                    zombie_abscissa = zombie.abscissa();
+                    zombie_row = zombie.row() + 1;
+                    if ((zombie_type == 23 || zombie_type == 32) &&
+                        (zombie_row == 6))
+                    {
+                        if (zombie_abscissa < zombie_min_position.min_abscissa)
+                        {
+                            zombie_min_position.min_abscissa = zombie_abscissa;
+                            zombie_min_position.min_row = zombie_row;
+                        }
+                    }
+                }
+            }
+
+            // 如果检测到了僵尸
+            if (zombie_min_position.min_row != 0)
+            {
+                use_squash_grid = {zombie_min_position.min_row, int(zombie_min_position.min_abscissa / 80)};
+
+                // 规定种植范围
+                if (use_squash_grid.col >= 5)
+                    use_squash_grid.col = 6;
+                if (use_squash_grid.col < 5)
+                    use_squash_grid.col = 5;
+                if (IsPlantable(use_squash_grid.row, use_squash_grid.col))
+                {
+                    if (GetPlantIndex(use_squash_grid.row, use_squash_grid.col, XPG_8) > -2)
+                    {
+                        Shovel(use_squash_grid.row, use_squash_grid.col);
+                    }
+                    Card(CHILI + 1, use_squash_grid.row, use_squash_grid.col);
+                }
+            }
+        }
+    }
+}
+
+void CorrectIceFiller2() //矫正Cvz存冰线程的bug,强制存冰
+{
+    SeedMemory ice_shroom_seed(ICE_SHROOM);
+    while (1)
+    {
+        Sleep(5001 - ice_shroom_seed.CD());
+        if (ice_shroom_seed.isUsable())
+        {
+            if (GetPlantIndex(4, 3, HBG_14) <= 0 ||
+                GetPlantIndex(3, 4, HBG_14) <= 0 ||
+                GetPlantIndex(3, 3, HBG_14) <= 0 ||
+                GetPlantIndex(3, 2, HBG_14) <= 0 ||
+                GetPlantIndex(2, 3, HBG_14) <= 0)
+            {
+                Card(ICE_SHROOM + 1, {{2, 3}, {3, 2}, {3, 3}, {3, 4}, {4, 3}});
+            }
+        }
+    }
+}
+
+void CorrectIceFiller() //矫正Cvz存冰线程的bug,强制存白冰
+{
+    SeedMemory ice_shroom_imitator_seed(ICE_SHROOM_IMITATOR);
+    while (1)
+    {
+        Sleep(5001 - ice_shroom_imitator_seed.CD());
+        if (ice_shroom_imitator_seed.isUsable())
+        {
+            if (GetPlantIndex(4, 3, HBG_14) <= 0 ||
+                GetPlantIndex(3, 4, HBG_14) <= 0 ||
+                GetPlantIndex(3, 3, HBG_14) <= 0 ||
+                GetPlantIndex(3, 2, HBG_14) <= 0 ||
+                GetPlantIndex(2, 3, HBG_14) <= 0)
+            {
+                Card(ICE_SHROOM_IMITATOR + 1, {{2, 3}, {3, 2}, {3, 3}, {3, 4}, {4, 3}});
+            }
+        }
+    }
+}
+//——————————————————————————————————————————————————————————————————————————————————————
+//————————————————————————————————————————END———————————————————————————————————————————
+//——————————————————————————————————————————————————————————————————————————————————————
